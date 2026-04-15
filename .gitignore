@@ -1,0 +1,42 @@
+# ───── Python ─────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+
+# ───── Virtual environments ───────────────────────────────────────
+env/
+venv/
+.venv/
+ENV/
+
+# ───── PyInstaller ────────────────────────────────────────────────
+basu-agent/build/
+basu-agent/dist/
+*.spec.bak
+
+# ───── Inno Setup output ──────────────────────────────────────────
+Output/
+
+# ───── Runtime / Logs ─────────────────────────────────────────────
+basu-agent/agent.log
+basu-agent/agent.log.*
+
+# ───── macOS ──────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# ───── Windows ────────────────────────────────────────────────────
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# ───── VS Code ────────────────────────────────────────────────────
+.vscode/
+
+# ───── Secrets / config with real credentials ─────────────────────
+# config.json IS committed but should only contain placeholder values.
+# Never commit a real API key.
