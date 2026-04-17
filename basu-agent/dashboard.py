@@ -27,6 +27,7 @@ from PyQt6.QtWidgets import (
 )
 
 import config
+import db
 from worker import SyncWorker
 
 logger = logging.getLogger(__name__)
@@ -375,16 +376,14 @@ class OverviewPage(QWidget):
 
     def refresh(self):
         with self._worker._lock:
-            students = list(self._worker._cached_students)
-            info     = dict(self._worker._cached_device_info)
+            info      = dict(self._worker._cached_device_info)
             last_sync = self._worker.last_sync_time
             server_ok = self._worker.server_reachable
 
-        total = len(students)
-        fp    = sum(1 for s in students if s.get("fingerprint_registered"))
-        self._c_users.set_value(str(total))
-        self._c_fp.set_value(str(fp))
-        self._c_nofp.set_value(str(total - fp))
+        stats = db.count_stats()
+        self._c_users.set_value(str(stats["total"]))
+        self._c_fp.set_value(str(stats["fingerprinted"]))
+        self._c_nofp.set_value(str(stats["not_enrolled"]))
 
         # Server status card
         self._c_server.set_value("Online" if server_ok else "Offline")
@@ -444,25 +443,29 @@ class StudentsPage(QWidget):
         self._search.setFixedHeight(36); self._search.setMaximumWidth(320)
         self._search.textChanged.connect(self._populate)
 
-        self._stat_lbl = QLabel("Loading…")
+        self._stat_lbl = QLabel("")
         self._stat_lbl.setStyleSheet(f"color:{TEXT_SEC}; background:transparent; border:none;")
 
-        btn_ref = QPushButton("🔄  Refresh from Device")
-        btn_ref.setFixedHeight(36); btn_ref.clicked.connect(self._load)
+        self._last_sync_lbl = QLabel("")
+        self._last_sync_lbl.setStyleSheet(f"color:{TEXT_SEC}; font-size:11px; background:transparent; border:none;")
 
-        btn_add = QPushButton("＋  Add Student")
-        btn_add.setObjectName("accent_btn"); btn_add.setFixedHeight(36)
-        btn_add.clicked.connect(self._on_add)
+        self._btn_ref = QPushButton("🔄  Refresh from Device")
+        self._btn_ref.setFixedHeight(36); self._btn_ref.clicked.connect(self._load)
 
-        btn_del_sel = QPushButton("🗑  Delete Selected")
-        btn_del_sel.setObjectName("danger_btn"); btn_del_sel.setFixedHeight(36)
-        btn_del_sel.clicked.connect(self._on_delete_selected)
+        self._btn_add = QPushButton("＋  Add Student")
+        self._btn_add.setObjectName("accent_btn"); self._btn_add.setFixedHeight(36)
+        self._btn_add.clicked.connect(self._on_add)
 
-        tb.addWidget(self._search); tb.addWidget(self._stat_lbl); tb.addStretch()
-        tb.addWidget(btn_ref); tb.addWidget(btn_del_sel); tb.addWidget(btn_add)
+        self._btn_del_sel = QPushButton("🗑  Delete Selected")
+        self._btn_del_sel.setObjectName("danger_btn"); self._btn_del_sel.setFixedHeight(36)
+        self._btn_del_sel.clicked.connect(self._on_delete_selected)
+
+        tb.addWidget(self._search); tb.addWidget(self._stat_lbl); tb.addWidget(self._last_sync_lbl)
+        tb.addStretch()
+        tb.addWidget(self._btn_ref); tb.addWidget(self._btn_del_sel); tb.addWidget(self._btn_add)
         root.addLayout(tb)
 
-        self._loading_lbl = QLabel("Loading students from device…")
+        self._loading_lbl = QLabel("Refreshing from device…")
         self._loading_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._loading_lbl.setStyleSheet(
             f"color:{TEXT_SEC}; font-size:14px; background:transparent; border:none;"
@@ -519,7 +522,10 @@ class StudentsPage(QWidget):
             self._table.setCellWidget(ri, 4, _cell_widget(del_btn))
 
     def _load(self):
+        """Trigger a full device read (slow path). Normal display uses _load_from_db()."""
         from device import ZKDevice
+        self._btn_ref.setEnabled(False)
+        self._btn_ref.setText("Refreshing…")
         self._loading_lbl.show()
         self._loader = DataLoader(ZKDevice().get_users_with_fingerprint_status, self)
         self._loader.result.connect(self._on_loaded)
@@ -527,14 +533,55 @@ class StudentsPage(QWidget):
         self._loader.start()
 
     def _on_loaded(self, students: list):
+        """Called when a full device read finishes. Upserts rows into the DB, then reloads from DB."""
+        self._btn_ref.setEnabled(True)
+        self._btn_ref.setText("🔄  Refresh from Device")
         self._loading_lbl.hide()
-        self._all = students
-        self._populate()
+        # Persist the fresh device snapshot to the local DB
+        for s in students:
+            # User may not have a server CUID if added locally; default to biometric_number str
+            existing = next(
+                (u for u in db.get_all_users() if u["biometric_number"] == s["uid"]), None
+            )
+            db.upsert_user(
+                biometric_number=s["uid"],
+                user_id=existing["user_id"] if existing else str(s["uid"]),
+                name=s["name"],
+                is_registered_on_device=True,
+                fingerprint_registered=bool(s.get("fingerprint_registered", False)),
+            )
+        self._load_from_db()
         with self._worker._lock:
-            self._worker._cached_students = list(students)
+            self._worker._cached_students = list(self._all)
+
+    def _load_from_db(self):
+        """Populate the table instantly from the local SQLite DB (no device round-trip)."""
+        users = db.get_all_users()
+        self._all = [
+            {
+                "uid": u["biometric_number"],
+                "user_id": u["user_id"],
+                "name": u["name"],
+                "fingerprint_registered": bool(u["fingerprint_registered"]),
+            }
+            for u in users
+        ]
+        last_sync = self._worker.last_sync_time
+        if last_sync:
+            delta = int((datetime.now() - last_sync).total_seconds())
+            if delta < 60:
+                self._last_sync_lbl.setText(f"synced {delta}s ago")
+            else:
+                self._last_sync_lbl.setText(f"synced {delta // 60}m ago")
+        else:
+            self._last_sync_lbl.setText("not synced yet")
+        self._populate()
 
     def _on_err(self, err: str):
-        self._loading_lbl.setText(f"Error: {err}")
+        self._btn_ref.setEnabled(True)
+        self._btn_ref.setText("🔄  Refresh from Device")
+        self._loading_lbl.setText(f"Device error: {err}")
+        self._loading_lbl.show()
         QTimer.singleShot(5000, self._loading_lbl.hide)
 
     def _on_add(self):
@@ -542,10 +589,33 @@ class StudentsPage(QWidget):
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         uid, name = dlg.result_uid, dlg.result_name
-        from device import ZKDevice
-        loader = DataLoader(lambda: ZKDevice().set_user(uid=uid, name=name, user_id=str(uid)), self)
-        loader.result.connect(lambda _: self._load())
-        loader.error.connect(lambda e: QMessageBox.critical(self, "Error", f"Could not add student:\n{e}"))
+        self._btn_add.setEnabled(False)
+        self._btn_add.setText("Adding…")
+
+        def _do_add():
+            from device import ZKDevice
+            ZKDevice().set_user(uid=uid, name=name, user_id=str(uid))
+            db.upsert_user(
+                biometric_number=uid,
+                user_id=str(uid),
+                name=name,
+                is_registered_on_device=True,
+                fingerprint_registered=False,
+            )
+
+        def _on_add_done(_):
+            self._btn_add.setEnabled(True)
+            self._btn_add.setText("＋  Add Student")
+            self._load_from_db()
+
+        def _on_add_err(e: str):
+            self._btn_add.setEnabled(True)
+            self._btn_add.setText("＋  Add Student")
+            QMessageBox.critical(self, "Error", f"Could not add student:\n{e}")
+
+        loader = DataLoader(_do_add, self)
+        loader.result.connect(_on_add_done)
+        loader.error.connect(_on_add_err)
         loader.start()
 
     def _on_delete(self, uid: int, name: str):
@@ -556,9 +626,14 @@ class StudentsPage(QWidget):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
         ) != QMessageBox.StandardButton.Yes:
             return
-        from device import ZKDevice
-        loader = DataLoader(lambda: ZKDevice().delete_user(uid=uid), self)
-        loader.result.connect(lambda _: self._load())
+
+        def _do_delete():
+            from device import ZKDevice
+            ZKDevice().delete_user(uid=uid)
+            db.delete_user(uid)
+
+        loader = DataLoader(_do_delete, self)
+        loader.result.connect(lambda _: self._load_from_db())
         loader.error.connect(lambda e: QMessageBox.critical(self, "Error", str(e)))
         loader.start()
 
@@ -619,25 +694,35 @@ class StudentsPage(QWidget):
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 
+        self._btn_del_sel.setEnabled(False)
+        self._btn_del_sel.setText("Deleting…")
+
         def _bulk_delete():
             from device import ZKDevice
             dev = ZKDevice()
             for uid in uids:
                 dev.delete_user(uid=uid)
+                db.delete_user(uid)
+
+        def _on_bulk_done(_):
+            self._btn_del_sel.setEnabled(True)
+            self._btn_del_sel.setText("🗑  Delete Selected")
+            self._load_from_db()
+
+        def _on_bulk_err(e: str):
+            self._btn_del_sel.setEnabled(True)
+            self._btn_del_sel.setText("🗑  Delete Selected")
+            QMessageBox.critical(self, "Error", str(e))
 
         loader = DataLoader(_bulk_delete, self)
-        loader.result.connect(lambda _: self._load())
-        loader.error.connect(lambda e: QMessageBox.critical(self, "Error", str(e)))
+        loader.result.connect(_on_bulk_done)
+        loader.error.connect(_on_bulk_err)
         loader.start()
 
     def showEvent(self, event):
         super().showEvent(event)
-        with self._worker._lock:
-            cached = list(self._worker._cached_students)
-        if cached:
-            self._on_loaded(cached)
-        else:
-            self._load()
+        # Load instantly from local DB — no device round-trip needed on every open
+        self._load_from_db()
 
 
 # ═════════════════════════════════════════════════════════════════
@@ -1110,6 +1195,18 @@ class DashboardWindow(QMainWindow):
 
         vbox.addWidget(self._build_top_bar())
 
+        # Sync-in-progress banner (hidden when idle)
+        self._sync_banner = QLabel("🔄  Syncing with server…")
+        self._sync_banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._sync_banner.setFixedHeight(28)
+        self._sync_banner.setStyleSheet(
+            f"background-color:{WARNING}22; color:{WARNING};"
+            f" font-size:12px; border-bottom:1px solid {WARNING}66;"
+            f" padding:0; margin:0;"
+        )
+        self._sync_banner.hide()
+        vbox.addWidget(self._sync_banner)
+
         body = QHBoxLayout(); body.setContentsMargins(0,0,0,0); body.setSpacing(0)
         body.addWidget(self._build_sidebar())
         body.addWidget(self._build_stack(), stretch=1)
@@ -1196,6 +1293,10 @@ class DashboardWindow(QMainWindow):
     # ── Status tick ───────────────────────────────────────────────
 
     def _tick(self):
+        with self._worker._lock:
+            syncing   = self._worker.syncing
+        self._sync_banner.setVisible(syncing)
+
         online    = self._worker.device_online
         server_ok = self._worker.server_reachable
         last_sync = self._worker.last_sync_time

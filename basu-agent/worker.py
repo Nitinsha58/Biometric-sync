@@ -25,6 +25,7 @@ from typing import Optional
 from zk.exception import ZKNetworkError, ZKErrorResponse
 
 import config
+import db
 from api import APIClient
 from device import ZKDevice
 
@@ -75,6 +76,7 @@ class SyncWorker(threading.Thread):
         self.server_reachable: bool = False
         self.last_sync_time: Optional[datetime] = None
         self.last_error: Optional[str] = None
+        self.syncing: bool = False
 
         # Data caches — dashboard reads these without hitting the device
         self._cached_students: list[dict] = []
@@ -87,6 +89,8 @@ class SyncWorker(threading.Thread):
 
         # Lock protects the public attributes when read by the dashboard thread
         self._lock = threading.Lock()
+
+        db.init_db()
 
     # ------------------------------------------------------------------
     # Public interface
@@ -152,36 +156,62 @@ class SyncWorker(threading.Thread):
 
     def _sync_cycle(self):
         logger.info("─── Sync cycle starting ───")
-        for attempt in range(1, _MAX_RETRIES + 1):
-            try:
-                self._do_sync()
-                with self._lock:
-                    self.device_online = True
-                    self.last_sync_time = datetime.now()
-                    self.last_error = None
-                logger.info("─── Sync cycle complete ───")
-                return
-            except (ZKNetworkError, ZKErrorResponse, OSError) as exc:
-                logger.warning(
-                    "Device unreachable (attempt %d/%d): %s", attempt, _MAX_RETRIES, exc
-                )
-                if attempt < _MAX_RETRIES:
-                    time.sleep(_RETRY_DELAY)
-            except Exception as exc:
-                logger.exception("Unexpected error in sync cycle: %s", exc)
-                with self._lock:
-                    self.device_online = False
-                    self.last_error = str(exc)
-                return
-
-        # All retries exhausted
         with self._lock:
-            self.device_online = False
-            self.last_error = "Device unreachable after %d attempts" % _MAX_RETRIES
-        logger.error(self.last_error)
+            self.syncing = True
+        try:
+            for attempt in range(1, _MAX_RETRIES + 1):
+                try:
+                    self._do_sync()
+                    with self._lock:
+                        self.device_online = True
+                        self.last_sync_time = datetime.now()
+                        self.last_error = None
+                    logger.info("─── Sync cycle complete ───")
+                    return
+                except (ZKNetworkError, ZKErrorResponse, OSError) as exc:
+                    logger.warning(
+                        "Device unreachable (attempt %d/%d): %s", attempt, _MAX_RETRIES, exc
+                    )
+                    if attempt < _MAX_RETRIES:
+                        time.sleep(_RETRY_DELAY)
+                except Exception as exc:
+                    logger.exception("Unexpected error in sync cycle: %s", exc)
+                    with self._lock:
+                        self.device_online = False
+                        self.last_error = str(exc)
+                    return
+
+            # All retries exhausted
+            with self._lock:
+                self.device_online = False
+                self.last_error = "Device unreachable after %d attempts" % _MAX_RETRIES
+            logger.error(self.last_error)
+        finally:
+            with self._lock:
+                self.syncing = False
 
     def _do_sync(self):
         _server_ok = False
+
+        # 0. Flush any pending fingerprint-enrollment reports to the server.
+        #    If the server is unreachable the flags stay set and are retried next cycle.
+        pending_fp = db.get_fp_pending_users()
+        if pending_fp:
+            fp_statuses = [
+                {
+                    "id": u["user_id"],
+                    "isRegistered": True,
+                    "isFingerPrintRegistered": True,
+                }
+                for u in pending_fp
+            ]
+            try:
+                self._api.mark_users_registered(fp_statuses)
+                db.clear_fp_pending([u["user_id"] for u in pending_fp])
+                logger.info("Flushed %d pending FP enrollment(s) to server", len(pending_fp))
+                _server_ok = True
+            except Exception as exc:
+                logger.warning("Could not flush pending FP enrollments (will retry): %s", exc)
 
         # 1. Fetch users not yet registered on device
         unregistered = []
@@ -192,40 +222,98 @@ class SyncWorker(threading.Thread):
         except Exception as exc:
             logger.warning("Could not fetch unregistered users: %s", exc)
 
-        # 2. Sync each unregistered user onto the device.
-        #    biometricNumber → device uid (int) AND device user_id (string)
-        #    Both fields carry the same serial id for simple, consistent lookups.
+        # 2. Sync each unregistered user onto the device and persist to local DB.
         for user in unregistered:
             cuid = user.get("id", "")
             name = (user.get("name") or "Unknown")[:24]
             device_uid = int(user["biometricNumber"])
             try:
                 self._device.set_user(uid=device_uid, name=name, user_id=str(device_uid))
-                logger.info("Synced '%s' → device uid=%d user_id=%s", name, device_uid, device_uid)
+                db.upsert_user(
+                    biometric_number=device_uid,
+                    user_id=cuid,
+                    name=name,
+                    is_registered_on_device=True,
+                    fingerprint_registered=False,
+                )
+                logger.info("Synced '%s' → device uid=%d user_id=%s", name, device_uid, cuid)
             except Exception as exc:
                 logger.error("Failed to sync user cuid=%s uid=%d: %s", cuid, device_uid, exc)
 
-        # 3. Read all device users + fingerprint status; update dashboard cache
+        # 3. Read all device users + fingerprint status.
         device_users = []
         try:
             device_users = self._device.get_users_with_fingerprint_status()
-            with self._lock:
-                self._cached_students = list(device_users)
             logger.info("Device has %d enrolled users", len(device_users))
         except Exception as exc:
             logger.warning("Could not read device users: %s", exc)
 
-        # 4. Report isRegistered + isFingerPrintRegistered back to server.
-        #    Match by biometricNumber (== device uid == device user_id).
+        # 3a. Detect newly enrolled fingerprints by comparing device state vs DB.
+        #     Flip fp_sync_pending=True so they are PATCHed to the server on the
+        #     next flush pass (step 0) or at the end of this cycle if server is up.
+        if device_users:
+            db_users = {u["biometric_number"]: u for u in db.get_all_users()}
+            for du in device_users:
+                bnum = du["uid"]
+                fp_on_device = bool(du.get("fingerprint_registered", False))
+                existing = db_users.get(bnum)
+                if existing is not None:
+                    was_enrolled = bool(existing["fingerprint_registered"])
+                    if fp_on_device and not was_enrolled:
+                        # Newly enrolled — mark pending so server is notified
+                        db.update_fp_status(
+                            biometric_number=bnum,
+                            fingerprint_registered=True,
+                            fp_sync_pending=True,
+                        )
+                        logger.info("Fingerprint newly enrolled for uid=%d — queued for server sync", bnum)
+                    elif not fp_on_device and was_enrolled:
+                        # Fingerprint removed from device
+                        db.update_fp_status(
+                            biometric_number=bnum,
+                            fingerprint_registered=False,
+                            fp_sync_pending=False,
+                        )
+                else:
+                    # User exists on device but not in DB (added outside this agent).
+                    # Persist without a server CUID — user_id defaults to biometric_number str.
+                    db.upsert_user(
+                        biometric_number=bnum,
+                        user_id=str(bnum),
+                        name=du.get("name", "Unknown"),
+                        is_registered_on_device=True,
+                        fingerprint_registered=fp_on_device,
+                    )
+
+        # 3b. Immediately flush any FP enrollments detected in this cycle.
+        newly_pending = db.get_fp_pending_users()
+        if newly_pending and _server_ok:
+            fp_statuses = [
+                {
+                    "id": u["user_id"],
+                    "isRegistered": True,
+                    "isFingerPrintRegistered": True,
+                }
+                for u in newly_pending
+            ]
+            try:
+                self._api.mark_users_registered(fp_statuses)
+                db.clear_fp_pending([u["user_id"] for u in newly_pending])
+                logger.info("Reported %d new FP enrollment(s) to server", len(newly_pending))
+            except Exception as exc:
+                logger.warning("Could not report new FP enrollments (will retry): %s", exc)
+
+        # 4. Report isRegistered + isFingerPrintRegistered back to server for the
+        #    batch of newly-pushed unregistered users.
         if unregistered:
             fp_by_serial: dict[str, bool] = {
-                u["user_id"]: u["fingerprint_registered"] for u in device_users
+                str(u["uid"]): u["fingerprint_registered"] for u in device_users
             }
-            registered_serials: set[str] = {u["user_id"] for u in device_users}
+            registered_serials: set[str] = {str(u["uid"]) for u in device_users}
 
             statuses = [
                 {
-                    "id": user["id"],   # CUID — required by server schema
+                    "id": user["id"],
                     "isRegistered": str(user["biometricNumber"]) in registered_serials,
                     "isFingerPrintRegistered": fp_by_serial.get(str(user["biometricNumber"]), False),
                 }
@@ -238,7 +326,20 @@ class SyncWorker(threading.Thread):
             except Exception as exc:
                 logger.warning("Could not PATCH mark-registered: %s", exc)
 
-        # 5. Cache device info for the dashboard
+        # 5. Update dashboard cache from the local DB (always reflects persisted state).
+        all_db_users = db.get_all_users()
+        with self._lock:
+            self._cached_students = [
+                {
+                    "uid": u["biometric_number"],
+                    "user_id": u["user_id"],
+                    "name": u["name"],
+                    "fingerprint_registered": bool(u["fingerprint_registered"]),
+                }
+                for u in all_db_users
+            ]
+
+        # 6. Cache device info for the dashboard.
         try:
             info = self._device.get_info()
             with self._lock:
@@ -246,7 +347,7 @@ class SyncWorker(threading.Thread):
         except Exception as exc:
             logger.debug("Could not refresh cached device info: %s", exc)
 
-        # 6. Persist server reachability for the dashboard status cards
+        # 7. Persist server reachability for the dashboard status cards.
         with self._lock:
             self.server_reachable = _server_ok
 

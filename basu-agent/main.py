@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 from PyQt6.QtCore import QTimer
 
 import config
+import db
 import startup
 from api import APIClient
 from device import ZKDevice
@@ -161,6 +162,8 @@ class BASUAgent:
 def main():
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)  # keep alive when dashboard closes
+
+    db.init_db()  # ensure DB and schema exist before worker starts
 
     if not QSystemTrayIcon.isSystemTrayAvailable():
         logger.error("System tray not available on this platform.")

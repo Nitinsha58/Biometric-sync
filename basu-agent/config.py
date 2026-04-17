@@ -31,6 +31,7 @@ def _get_data_dir() -> Path:
 DATA_DIR    = _get_data_dir()
 CONFIG_PATH = DATA_DIR / "config.json"
 LOG_PATH    = DATA_DIR / "agent.log"
+DB_PATH     = DATA_DIR / "basu_agent.db"
 
 
 def _seed_config_if_missing() -> None:
