@@ -140,11 +140,58 @@ class ZKDevice:
             )
         logger.info("set_user: uid=%s name=%s", uid, name)
 
+    def set_users_bulk(
+        self, users: list[dict]
+    ) -> list[tuple[dict, Optional[Exception]]]:
+        """
+        Create or update multiple users in a single device connection.
+
+        Each item in `users` must have: uid (int), name (str), user_id (str).
+        Returns a list of (user_dict, error_or_None) pairs in the same order.
+        Opening one connection for the whole batch avoids per-user TCP overhead.
+        """
+        results: list[tuple[dict, Optional[Exception]]] = []
+        with self._connection() as conn:
+            for u in users:
+                try:
+                    conn.set_user(
+                        uid=u["uid"],
+                        name=u["name"][:24],
+                        privilege=0,
+                        password="",
+                        user_id=str(u["user_id"]),
+                    )
+                    logger.info("set_user: uid=%s name=%s", u["uid"], u["name"])
+                    results.append((u, None))
+                except Exception as exc:
+                    results.append((u, exc))
+        return results
+
     def delete_user(self, uid: int) -> None:
         """Remove a user from the device by uid."""
         with self._connection() as conn:
             conn.delete_user(uid=uid)
         logger.info("delete_user: uid=%s", uid)
+
+    def delete_users_bulk(
+        self, uids: list[int]
+    ) -> list[tuple[int, Optional[Exception]]]:
+        """
+        Delete multiple users in a single device connection.
+
+        Returns list of (uid, error_or_None) pairs in the same order.
+        Opening one connection for the whole batch avoids per-user TCP overhead.
+        """
+        results: list[tuple[int, Optional[Exception]]] = []
+        with self._connection() as conn:
+            for uid in uids:
+                try:
+                    conn.delete_user(uid=uid)
+                    logger.info("delete_user: uid=%s", uid)
+                    results.append((uid, None))
+                except Exception as exc:
+                    results.append((uid, exc))
+        return results
 
     def clear_attendance(self) -> None:
         """Remove all attendance records from the device."""

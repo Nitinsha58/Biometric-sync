@@ -178,10 +178,67 @@ def update_fp_status(biometric_number: int, fingerprint_registered: bool, fp_syn
     conn.commit()
 
 
+def upsert_users_bulk(
+    users: list[dict],
+) -> None:
+    """
+    Insert or update many users in a single transaction.
+
+    Each dict must have: biometric_number, user_id, name,
+    is_registered_on_device, fingerprint_registered.
+    fp_sync_pending is preserved on UPDATE, set to 0 on INSERT.
+    """
+    if not users:
+        return
+    conn = _get_conn()
+    now = _now_iso()
+    conn.executemany(
+        """
+        INSERT INTO users
+            (biometric_number, user_id, name,
+             fingerprint_registered, is_registered_on_device, fp_sync_pending,
+             created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, 0, ?, ?)
+        ON CONFLICT(biometric_number) DO UPDATE SET
+            user_id = excluded.user_id,
+            name    = excluded.name,
+            fingerprint_registered   = excluded.fingerprint_registered,
+            is_registered_on_device  = excluded.is_registered_on_device,
+            updated_at               = excluded.updated_at
+        """,
+        [
+            (
+                u["biometric_number"],
+                u["user_id"],
+                u["name"],
+                int(u["fingerprint_registered"]),
+                int(u["is_registered_on_device"]),
+                now,
+                now,
+            )
+            for u in users
+        ],
+    )
+    conn.commit()
+
+
 def delete_user(biometric_number: int) -> None:
     """Remove a user from the local DB (called after successful device deletion)."""
     conn = _get_conn()
     conn.execute("DELETE FROM users WHERE biometric_number = ?", (biometric_number,))
+    conn.commit()
+
+
+def delete_users_bulk(biometric_numbers: list[int]) -> None:
+    """Remove multiple users in a single transaction."""
+    if not biometric_numbers:
+        return
+    conn = _get_conn()
+    placeholders = ",".join("?" * len(biometric_numbers))
+    conn.execute(
+        f"DELETE FROM users WHERE biometric_number IN ({placeholders})",
+        biometric_numbers,
+    )
     conn.commit()
 
 

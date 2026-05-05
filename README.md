@@ -37,10 +37,10 @@ Biometric/
 
 ### Prerequisites
 
-| Tool | Download |
-|------|----------|
+| Tool         | Download                          |
+| ------------ | --------------------------------- |
 | Python 3.11+ | https://www.python.org/downloads/ |
-| Git | https://git-scm.com/download/win |
+| Git          | https://git-scm.com/download/win  |
 
 ### 1 — Clone
 
@@ -64,12 +64,12 @@ Edit `basu-agent\config.json` with your real values:
 
 ```json
 {
-  "center_id": "your_center_id",
-  "device_ip": "192.168.1.201",
-  "device_port": 4370,
-  "server_url": "https://be.basueducation.com",
-  "api_key": "your_api_key_here",
-  "sync_interval_seconds": 300
+	"center_id": "your_center_id",
+	"device_ip": "192.168.1.201",
+	"device_port": 4370,
+	"server_url": "https://be.basueducation.com",
+	"api_key": "your_api_key_here",
+	"sync_interval_seconds": 300
 }
 ```
 
@@ -128,14 +128,14 @@ pyinstaller build.spec
 
 ## Configuration reference
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `center_id` | — | Unique ID for this BASU center |
-| `device_ip` | `192.168.1.201` | IP address of the ZKTeco device |
-| `device_port` | `4370` | TCP port (default for ZKTeco) |
-| `server_url` | — | BASU backend base URL |
-| `api_key` | — | API key for the backend |
-| `sync_interval_seconds` | `300` | How often the agent syncs (seconds) |
+| Key                     | Default         | Description                         |
+| ----------------------- | --------------- | ----------------------------------- |
+| `center_id`             | —               | Unique ID for this BASU center      |
+| `device_ip`             | `192.168.1.201` | IP address of the ZKTeco device     |
+| `device_port`           | `4370`          | TCP port (default for ZKTeco)       |
+| `server_url`            | —               | BASU backend base URL               |
+| `api_key`               | —               | API key for the backend             |
+| `sync_interval_seconds` | `300`           | How often the agent syncs (seconds) |
 
 Changes made via the dashboard **Settings** page take effect immediately without a restart.
 
@@ -143,9 +143,9 @@ Changes made via the dashboard **Settings** page take effect immediately without
 
 ## Troubleshooting
 
-| Symptom | Fix |
-|---------|-----|
-| Tray icon stays grey | Device unreachable — check IP and that the device is on the same network |
-| "Server unreachable" in status bar | Check `server_url` and `api_key` in config |
-| Users show 0 after sync | Check that `biometricNumber` is set for students in the portal |
-| Log file location | `%APPDATA%\BASU_Biometric_Agent\agent.log` (frozen) or `basu-agent\agent.log` (dev) |
+| Symptom                            | Fix                                                                                 |
+| ---------------------------------- | ----------------------------------------------------------------------------------- |
+| Tray icon stays grey               | Device unreachable — check IP and that the device is on the same network            |
+| "Server unreachable" in status bar | Check `server_url` and `api_key` in config                                          |
+| Users show 0 after sync            | Check that `biometricNumber` is set for students in the portal                      |
+| Log file location                  | `%APPDATA%\BASU_Biometric_Agent\agent.log` (frozen) or `basu-agent\agent.log` (dev) |

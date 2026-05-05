@@ -700,9 +700,16 @@ class StudentsPage(QWidget):
         def _bulk_delete():
             from device import ZKDevice
             dev = ZKDevice()
-            for uid in uids:
-                dev.delete_user(uid=uid)
-                db.delete_user(uid)
+            results = dev.delete_users_bulk(uids)
+            failed, succeeded = [], []
+            for uid, exc in results:
+                if exc:
+                    logger.error("Failed to delete uid=%d: %s", uid, exc)
+                    failed.append(uid)
+                else:
+                    succeeded.append(uid)
+            if succeeded:
+                db.delete_users_bulk(succeeded)
 
         def _on_bulk_done(_):
             self._btn_del_sel.setEnabled(True)

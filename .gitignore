@@ -40,3 +40,5 @@ Desktop.ini
 # ───── Secrets / config with real credentials ─────────────────────
 # config.json IS committed but should only contain placeholder values.
 # Never commit a real API key.
+# Added by code-review-graph
+.code-review-graph/

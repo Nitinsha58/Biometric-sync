@@ -4,5 +4,5 @@
   "device_port": 4370,
   "server_url": "https://be.basueducation.com",
   "api_key": "your_api_key_here",
-  "sync_interval_seconds": 300
+  "sync_interval_seconds": 10
 }

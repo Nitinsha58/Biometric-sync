@@ -223,22 +223,47 @@ class SyncWorker(threading.Thread):
             logger.warning("Could not fetch unregistered users: %s", exc)
 
         # 2. Sync each unregistered user onto the device and persist to local DB.
-        for user in unregistered:
-            cuid = user.get("id", "")
-            name = (user.get("name") or "Unknown")[:24]
-            device_uid = int(user["biometricNumber"])
+        #    Use a single bulk connection to avoid per-user TCP overhead on the device.
+        if unregistered:
+            bulk_input = [
+                {
+                    "uid": int(u["biometricNumber"]),
+                    "name": (u.get("name") or "Unknown")[:24],
+                    "user_id": str(int(u["biometricNumber"])),
+                    "cuid": u.get("id", ""),
+                }
+                for u in unregistered
+            ]
             try:
-                self._device.set_user(uid=device_uid, name=name, user_id=str(device_uid))
-                db.upsert_user(
-                    biometric_number=device_uid,
-                    user_id=cuid,
-                    name=name,
-                    is_registered_on_device=True,
-                    fingerprint_registered=False,
-                )
-                logger.info("Synced '%s' → device uid=%d user_id=%s", name, device_uid, cuid)
+                bulk_results = self._device.set_users_bulk(bulk_input)
             except Exception as exc:
-                logger.error("Failed to sync user cuid=%s uid=%d: %s", cuid, device_uid, exc)
+                logger.error("Bulk set_users failed entirely: %s", exc)
+                bulk_results = [(u, exc) for u in bulk_input]
+
+            to_persist = []
+            for bu, exc in bulk_results:
+                if exc:
+                    logger.error(
+                        "Failed to sync user cuid=%s uid=%d: %s",
+                        bu["cuid"], bu["uid"], exc,
+                    )
+                else:
+                    to_persist.append(bu)
+                    logger.info(
+                        "Synced '%s' → device uid=%d user_id=%s",
+                        bu["name"], bu["uid"], bu["cuid"],
+                    )
+            if to_persist:
+                db.upsert_users_bulk([
+                    {
+                        "biometric_number": bu["uid"],
+                        "user_id": bu["cuid"],
+                        "name": bu["name"],
+                        "is_registered_on_device": True,
+                        "fingerprint_registered": False,
+                    }
+                    for bu in to_persist
+                ])
 
         # 3. Read all device users + fingerprint status.
         device_users = []
